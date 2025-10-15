@@ -36,7 +36,7 @@ class Config:
     # Signal processing parameters
     SAMPLING_RATE = 500
     SEGMENT_LENGTH = 5
-    OVERLAP_RATIO = 0.6
+    OVERLAP_RATIO = 0.8 #0.0 ~ 0.8
     
     # Feature selection parameters
     FEATURE_SELECTION = True
