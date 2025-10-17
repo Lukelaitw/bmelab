@@ -56,7 +56,7 @@ class _MainScreenState extends State<MainScreen> {
             },
           ),
           DataPage(bluetoothManager: _bluetoothManager),
-          ECGViewerPage(bluetoothManager: _bluetoothManager),
+          EcgViewerPage(bluetoothManager: _bluetoothManager),
         ],
       ),
       bottomNavigationBar: BottomNavigationBar(

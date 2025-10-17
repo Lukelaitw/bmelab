@@ -59,6 +59,13 @@ class _ConnectionPageState extends State<ConnectionPage> {
   Future<void> _scanForDevices() async {
     if (_isScanning) return;
 
+    print('=' * 60);
+    print('🔍 [Flutter 藍牙掃描] 開始掃描設備');
+    print('=' * 60);
+    print('⏰ 時間: ${DateTime.now().toString().substring(11, 19)}');
+    print('📡 掃描類型: 所有藍牙設備');
+    print('=' * 60);
+
     setState(() {
       _isScanning = true;
       _devices.clear();
@@ -70,12 +77,21 @@ class _ConnectionPageState extends State<ConnectionPage> {
       List<BluetoothDevice> devices = await widget.bluetoothManager.scanForDevices(
         deviceNameFilter: null, // 移除名稱過濾
       );
+      
+      print('📱 掃描完成，找到 ${devices.length} 個設備:');
+      for (var device in devices) {
+        String deviceName = device.platformName.isEmpty ? "未知設備" : device.platformName;
+        print('  - $deviceName (${device.remoteId})');
+      }
+      print('=' * 60);
+      
       setState(() {
         _devices = devices;
         _isScanning = false;
         _statusMessage = '掃描完成，找到 ${devices.length} 個藍牙設備';
       });
     } catch (e) {
+      print('❌ 掃描失敗: $e');
       setState(() {
         _isScanning = false;
         _statusMessage = '掃描失敗: $e';
@@ -145,6 +161,15 @@ class _ConnectionPageState extends State<ConnectionPage> {
   Future<void> _connectToDevice(BluetoothDevice device) async {
     if (_isConnecting) return;
 
+    // 在命令行中顯示連接嘗試
+    print('=' * 60);
+    print('🔗 [Flutter 藍牙連接] 嘗試連接');
+    print('=' * 60);
+    print('⏰ 時間: ${DateTime.now().toString().substring(11, 19)}');
+    print('📱 設備名稱: ${device.platformName}');
+    print('🆔 設備ID: ${device.remoteId}');
+    print('=' * 60);
+
     setState(() {
       _isConnecting = true;
       _selectedDevice = device;
@@ -154,6 +179,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
     try {
       bool success = await widget.bluetoothManager.connectToDevice(device);
       if (success) {
+        print('✅ 藍牙連接成功！');
         setState(() {
           _statusMessage = '已成功連接到 ${device.platformName}';
         });
@@ -161,11 +187,13 @@ class _ConnectionPageState extends State<ConnectionPage> {
         await Future.delayed(const Duration(seconds: 1));
         widget.onConnected();
       } else {
+        print('❌ 藍牙連接失敗');
         setState(() {
           _statusMessage = '連接失敗，請重試';
         });
       }
     } catch (e) {
+      print('❌ 連接時發生錯誤: $e');
       setState(() {
         _statusMessage = '連接時發生錯誤: $e';
       });
@@ -251,7 +279,11 @@ class _ConnectionPageState extends State<ConnectionPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('ID: ${device.remoteId}'),
-                Text('信號強度: 未知'),
+                Text('類型: ${device.platformName.isEmpty ? "BLE設備" : "已命名設備"}'),
+                if (device.platformName.toLowerCase().contains('arduino') || 
+                    device.platformName.toLowerCase().contains('hm') ||
+                    device.platformName.toLowerCase().contains('ble'))
+                  const Text('🎯 可能是目標設備', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
               ],
             ),
             trailing: widget.bluetoothManager.isConnected

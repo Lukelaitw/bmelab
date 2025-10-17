@@ -1,138 +1,202 @@
-/*
- * Arduino 藍牙模組傳送訊息給手機
- * 支援 HC-05, HC-06, HM-10 等藍牙模組
- * 
- * 接線說明：
- * HC-05/HC-06:
- * - VCC -> 5V (或 3.3V)
- * - GND -> GND
- * - TXD -> Arduino Pin 2 (RX)
- * - RXD -> Arduino Pin 3 (TX)
- * 
- * HM-10:
- * - VCC -> 3.3V
- * - GND -> GND
- * - TXD -> Arduino Pin 2 (RX)
- * - RXD -> Arduino Pin 3 (TX)
- */
+// HM-10 BLE 模組專用程式碼
+// 注意：HM-10 使用 Hardware Serial (通常是 Serial1 或 Serial2)
+// 如果您的 Arduino 只有一個 Serial，請使用 SoftwareSerial
 
 #include <SoftwareSerial.h>
 
-// 藍牙模組接腳設定
-const int BT_RX_PIN = 2;  // Arduino 接藍牙模組 TXD
-const int BT_TX_PIN = 3;  // Arduino 接藍牙模組 RXD
-SoftwareSerial bluetooth(BT_RX_PIN, BT_TX_PIN);
+// HM-10 連接設定
+SoftwareSerial BTSerial(2, 3); // RX (connect to HM-10 TX), TX (connect to HM-10 RX)
+bool start_recv = false;
+const long baud_rate = 9600; // HM-10 預設波特率
+int in = A0;
+bool adc_running = false;
+unsigned long last_send_time = 0;
+const unsigned long send_interval = 100; // 發送間隔 (毫秒)
 
-// 感測器接腳
-const int SENSOR_PIN = A0;        // 類比感測器
-const int BUTTON_PIN = 4;         // 按鈕
-const int LED_PIN = 13;           // 內建LED
-
-// 變數
-int sensorValue = 0;
-bool buttonState = false;
-bool lastButtonState = false;
-unsigned long lastSendTime = 0;
-const unsigned long SEND_INTERVAL = 1000; // 每秒傳送一次
+// 添加數據緩衝區和錯誤處理
+String data_buffer = "";
+bool data_ready = false;
+int error_count = 0;
+const int max_errors = 10;
+bool hm10_initialized = false;
 
 void setup() {
-  // 初始化序列埠
-  Serial.begin(9600);
-  bluetooth.begin(9600);
+  Serial.begin(baud_rate);
+  BTSerial.begin(baud_rate);
   
-  // 設定接腳模式
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(LED_PIN, OUTPUT);
+  // 等待 HM-10 模組初始化
+  delay(2000);
   
-  // 等待藍牙模組初始化
+  Serial.println("Arduino HM-10 BLE 發送器已啟動");
+  Serial.println("等待 BLE 連接...");
+  
+  // 初始化 HM-10 模組
+  initializeHM10();
+  
+  // 發送初始化信號
+  BTSerial.println("ARDUINO_READY");
+  Serial.println("📤 發送初始化信號: ARDUINO_READY");
+  
+  // 測試藍牙通訊
+  BTSerial.println("TEST_CONNECTION");
+  Serial.println("📤 發送測試信號: TEST_CONNECTION");
+}
+
+// HM-10 初始化函數
+void initializeHM10() {
+  Serial.println("🔧 初始化 HM-10 模組...");
+  
+  // 發送 AT 指令檢查連接
+  BTSerial.println("AT");
   delay(1000);
   
-  Serial.println("=== Arduino 藍牙傳送系統 ===");
-  Serial.println("系統已就緒，等待手機連接...");
-  Serial.println("請在手機上開啟藍牙並搜尋裝置");
+  // 設定 HM-10 為從機模式
+  BTSerial.println("AT+ROLE0");
+  delay(1000);
   
-  // 發送初始訊息
-  sendMessage("Arduino已連接！");
+  // 設定設備名稱
+  BTSerial.println("AT+NAMEArduino_ECG");
+  delay(1000);
+  
+  // 設定波特率
+  BTSerial.println("AT+BAUD9600");
+  delay(1000);
+  
+  // 開始廣播
+  BTSerial.println("AT+ADVI1");
+  delay(1000);
+  
+  Serial.println("✅ HM-10 初始化完成");
+  hm10_initialized = true;
 }
 
 void loop() {
-  // 讀取感測器數據
-  sensorValue = analogRead(SENSOR_PIN);
-  
-  // 讀取按鈕狀態
-  buttonState = !digitalRead(BUTTON_PIN); // 使用內部上拉電阻，所以按鈕按下時為LOW
-  
-  // 檢查按鈕是否被按下
-  if (buttonState && !lastButtonState) {
-    sendMessage("按鈕被按下！");
-    digitalWrite(LED_PIN, HIGH);
-    delay(200);
-    digitalWrite(LED_PIN, LOW);
+  // 檢查藍牙接收
+  if (BTSerial.available()) {
+    char c = BTSerial.read();
+    
+    if (c == '\n' || c == '\r') {
+      if (data_buffer.length() > 0) {
+        String received = data_buffer;
+        data_buffer = "";
+        
+        Serial.print("📥 收到藍牙指令: ");
+        Serial.println(received);
+        
+        // 處理接收到的指令
+        if (received == "START_ADC") {
+          adc_running = true;
+          Serial.println("✅ 開始ADC數據傳輸");
+          BTSerial.println("ADC_TRANSMISSION:STARTED");
+          Serial.println("📤 發送回應: ADC_TRANSMISSION:STARTED");
+          error_count = 0; // 重置錯誤計數
+        }
+        else if (received == "STOP_ADC") {
+          adc_running = false;
+          Serial.println("⏹️ 停止ADC數據傳輸");
+          BTSerial.println("ADC_TRANSMISSION:STOPPED");
+          Serial.println("📤 發送回應: ADC_TRANSMISSION:STOPPED");
+        }
+        else if (received == "STATUS") {
+          Serial.println("🔍 狀態查詢");
+          BTSerial.println("SYSTEM_STATUS:READY");
+          Serial.println("📤 發送回應: SYSTEM_STATUS:READY");
+        }
+        else if (received == "HELLO") {
+          Serial.println("👋 通訊測試");
+          BTSerial.println("HEARTBEAT:OK");
+          Serial.println("📤 發送回應: HEARTBEAT:OK");
+        }
+        else if (received == "PING") {
+          Serial.println("🏓 收到PING");
+          BTSerial.println("PONG");
+          Serial.println("📤 發送回應: PONG");
+        }
+        else {
+          Serial.print("❓ 未知指令: ");
+          Serial.println(received);
+          error_count++;
+        }
+      }
+    } else {
+      data_buffer += c;
+    }
   }
-  lastButtonState = buttonState;
   
-  // 定期傳送感測器數據
-  if (millis() - lastSendTime >= SEND_INTERVAL) {
-    sendSensorData();
-    lastSendTime = millis();
+  // 如果ADC正在運行，定期發送數據
+  if (adc_running && (millis() - last_send_time >= send_interval)) {
+    int adc_value = analogRead(A0);
+    double voltage = (adc_value * 5.0) / 1023.0;
+    
+    // 檢查錯誤計數，如果錯誤太多則停止
+    if (error_count >= max_errors) {
+      Serial.println("❌ 錯誤過多，停止ADC傳輸");
+      adc_running = false;
+      BTSerial.println("ADC_TRANSMISSION:ERROR");
+      return;
+    }
+    
+    // 發送格式化的數據，添加時間戳
+    unsigned long timestamp = millis();
+    String data_string = "ADC_DATA:" + String(adc_value) + "," + String(voltage, 3) + "," + String(timestamp);
+    
+    // HM-10 專用數據發送
+    sendToHM10(data_string);
+    
+    // 在序列埠監視器中也顯示
+    Serial.print("📤 發送藍牙數據: ");
+    Serial.println(data_string);
+    Serial.print("📊 ADC: ");
+    Serial.print(adc_value);
+    Serial.print(" (");
+    Serial.print(voltage, 3);
+    Serial.print("V) - 時間: ");
+    Serial.println(timestamp);
+    
+    last_send_time = millis();
   }
   
-  // 檢查是否收到手機的指令
-  if (bluetooth.available()) {
-    String command = bluetooth.readString();
-    command.trim();
-    handleCommand(command);
+  // 定期發送心跳信號（即使ADC未運行）
+  static unsigned long last_heartbeat = 0;
+  if (millis() - last_heartbeat >= 5000) { // 每5秒發送一次心跳
+    sendToHM10("HEARTBEAT:ALIVE");
+    Serial.println("💓 發送心跳信號");
+    last_heartbeat = millis();
   }
-  
-  // 將收到的藍牙訊息轉發到序列埠監視器
-  if (bluetooth.available()) {
-    char c = bluetooth.read();
-    Serial.write(c);
-  }
-  
-  delay(50); // 短暫延遲
 }
 
-// 傳送訊息到手機
-void sendMessage(String message) {
-  bluetooth.println(message);
-  Serial.println("傳送到手機: " + message);
+// HM-10 專用數據發送函數
+void sendToHM10(String data) {
+  if (!hm10_initialized) {
+    Serial.println("⚠️ HM-10 未初始化，跳過發送");
+    return;
+  }
+  
+  // 檢查藍牙連接狀態
+  if (BTSerial.availableForWrite() > 0) {
+    // 使用 AT+NOTI 指令發送數據
+    BTSerial.print("AT+NOTI");
+    BTSerial.print(data);
+    BTSerial.println();
+    
+    // 等待發送完成
+    delay(10);
+    
+    Serial.println("✅ 數據已發送到 HM-10");
+  } else {
+    Serial.println("⚠️ HM-10 緩衝區已滿，跳過數據發送");
+  }
 }
 
-// 傳送感測器數據
-void sendSensorData() {
-  String data = "感測器數值: " + String(sensorValue);
-  sendMessage(data);
+// 檢查 HM-10 連接狀態
+bool checkHM10Connection() {
+  BTSerial.println("AT+CONN?");
+  delay(100);
   
-  // 根據感測器數值發送不同訊息
-  if (sensorValue > 800) {
-    sendMessage("感測器數值很高！");
-  } else if (sensorValue < 200) {
-    sendMessage("感測器數值很低！");
+  if (BTSerial.available()) {
+    String response = BTSerial.readString();
+    response.trim();
+    return response.indexOf("OK") >= 0;
   }
-}
-
-// 處理來自手機的指令
-void handleCommand(String command) {
-  Serial.println("收到指令: " + command);
-  
-  if (command == "LED_ON") {
-    digitalWrite(LED_PIN, HIGH);
-    sendMessage("LED已開啟");
-  }
-  else if (command == "LED_OFF") {
-    digitalWrite(LED_PIN, LOW);
-    sendMessage("LED已關閉");
-  }
-  else if (command == "STATUS") {
-    sendMessage("系統狀態正常");
-    sendMessage("感測器數值: " + String(sensorValue));
-    sendMessage("按鈕狀態: " + String(buttonState ? "按下" : "未按下"));
-  }
-  else if (command == "HELLO") {
-    sendMessage("你好！我是Arduino！");
-  }
-  else {
-    sendMessage("未知指令: " + command);
-  }
+  return false;
 }
