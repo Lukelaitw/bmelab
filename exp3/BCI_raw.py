@@ -15,6 +15,9 @@ import os
 import glob
 import warnings
 warnings.filterwarnings('ignore')
+from scipy.signal import welch, butter, filtfilt
+from scipy.stats import skew, kurtosis
+
 
 # Parameter Settings
 class Config:
@@ -22,13 +25,13 @@ class Config:
     DATASET_PATH = "bci_dataset_113-2"
     
     # MLP model parameters
-    HIDDEN_LAYERS = (128, 64, 32)
-    MAX_ITER = 100
-    LEARNING_RATE = 0.001
+    HIDDEN_LAYERS = (32, 4)
+    MAX_ITER = 60
+    LEARNING_RATE = 0.005
     ALPHA = 0.001
     ACTIVATION = 'relu'
     SOLVER = 'adam'
-    BATCH_SIZE = 64
+    BATCH_SIZE = 32
     EARLY_STOPPING = True
     VALIDATION_FRACTION = 0.1
     N_ITER_NO_CHANGE = 10
@@ -36,17 +39,129 @@ class Config:
     # Signal processing parameters
     SAMPLING_RATE = 500
     SEGMENT_LENGTH = 5
-    OVERLAP_RATIO = 0.8 #0.0 ~ 0.8
+    OVERLAP_RATIO = 0.5 #0.0 ~ 0.8
     
     # Feature selection parameters
     FEATURE_SELECTION = True
     # NOTE: When using raw data, N_FEATURES_SELECT will select the top N time points from the segment.
     # The number of features is now the number of samples in a segment (SEGMENT_LENGTH * SAMPLING_RATE).
     # You may want to adjust this value or disable feature selection.
-    N_FEATURES_SELECT = 30
+    N_FEATURES_SELECT = 11
     
     # Other settings
     RANDOM_STATE = 42
+
+# === student feature extraction ===
+class FeatureExtractor:
+    def __init__(self, fs):
+        self.fs = fs
+        # 頻帶(Hz)
+        self.bands = {
+            "delta": (0.5, 4),
+            "theta": (4, 8),
+            "alpha": (8, 13),
+            "beta":  (13, 30),
+            "gamma": (30, 45)
+        }
+        self.feature_names = self._build_feature_names()
+        # 設計帶通濾波器 (0.5-45 Hz)
+        self.filter_low = 0.5
+        self.filter_high = 45
+        self.filter_order = 4
+        self.b, self.a = butter(self.filter_order, 
+                               [self.filter_low, self.filter_high], 
+                               btype='band', fs=self.fs)
+
+    def _build_feature_names(self):
+        names = []
+        # 絕對與相對頻帶能量
+        for b in self.bands.keys():
+            names.append(f"bp_{b}_abs")
+        for b in self.bands.keys():
+            names.append(f"bp_{b}_rel")
+        # 比值
+        names += ["ratio_alpha_theta", "ratio_beta_alpha"]
+        # Hjorth
+        names += ["hj_activity", "hj_mobility", "hj_complexity"]
+        # 時域統計
+        names += ["mean", "std", "skew", "kurtosis", "rms", "zcr"]
+        # 頻譜熵
+        names += ["spectral_entropy"]
+        return names
+
+    def _bandpower(self, x):
+        # Welch 功率譜
+        f, Pxx = welch(x, fs=self.fs, nperseg=min(len(x), 512))
+        total_power = np.trapz(Pxx, f) + 1e-12
+        band_abs = {}
+        band_rel = {}
+        for name, (lo, hi) in self.bands.items():
+            idx = np.logical_and(f >= lo, f < hi)
+            power = np.trapz(Pxx[idx], f[idx])
+            band_abs[name] = power
+            band_rel[name] = power / total_power
+        return band_abs, band_rel
+
+    def _hjorth(self, x):
+        # Hjorth 參數
+        x = np.asarray(x)
+        dx = np.diff(x, prepend=x[0])
+        ddx = np.diff(dx, prepend=dx[0])
+        var0 = np.var(x) + 1e-12
+        var1 = np.var(dx) + 1e-12
+        var2 = np.var(ddx) + 1e-12
+        activity = var0
+        mobility = np.sqrt(var1 / var0)
+        complexity = np.sqrt(var2 / var1) / (mobility + 1e-12)
+        return activity, mobility, complexity
+
+    def _zcr(self, x):
+        x = np.asarray(x)
+        return np.mean(np.abs(np.diff(np.sign(x)))) / 2.0
+
+    def _spectral_entropy(self, x):
+        f, Pxx = welch(x, fs=self.fs, nperseg=min(len(x), 512))
+        psd = Pxx + 1e-12
+        psd = psd / psd.sum()
+        return -np.sum(psd * np.log(psd))
+
+    def extract_features(self, segment):
+        # 應用帶通濾波器
+        filtered_segment = filtfilt(self.b, self.a, segment)
+        
+        band_abs, band_rel = self._bandpower(filtered_segment)
+        activity, mobility, complexity = self._hjorth(filtered_segment)
+        feats = []
+        # 絕對與相對頻帶能量
+        for name in self.bands.keys():
+            feats.append(band_abs[name])
+        for name in self.bands.keys():
+            feats.append(band_rel[name])
+        # 比值
+        alpha = band_abs["alpha"] + 1e-12
+        theta = band_abs["theta"] + 1e-12
+        beta  = band_abs["beta"]  + 1e-12
+        feats.append(alpha / theta)  # alpha/theta
+        feats.append(beta / alpha)   # beta/alpha
+        # Hjorth
+        feats += [activity, mobility, complexity]
+        # 時域統計
+        x = np.asarray(filtered_segment)
+        feats += [np.mean(x), np.std(x), skew(x), kurtosis(x), np.sqrt(np.mean(x**2)), self._zcr(x)]
+        # 頻譜熵
+        feats += [self._spectral_entropy(x)]
+
+        y = [ alpha/(alpha+beta+theta),beta/(alpha+theta),alpha/(beta+theta),activity, mobility, complexity, np.mean(x), np.std(x), skew(x), kurtosis(x), np.sqrt(np.mean(x**2)), self._zcr(x), self._spectral_entropy(x)]
+
+        return np.array(y, dtype=float)
+
+# === student feature extraction ===
+
+
+
+
+
+
 
 
 # Data Loading and Processing
@@ -76,9 +191,9 @@ def create_segments(data, segment_length_samples, overlap_samples):
         segment = data[start:start + segment_length_samples]
         segments.append(segment)
         start += step
-    
-    return np.array(segments)
-
+# === student data loading and processing ===
+    return  np.array(segments[70:-80])
+# === student data loading and processing ===
 
 # Model Definition and Training
 class EnhancedBCIClassifier:
@@ -152,7 +267,10 @@ def load_all_subjects():
     if not subject_folders:
         print(f"Error: No subject folders found in {Config.DATASET_PATH}")
         return None, None, None
-    
+    #======student load feature extractor======
+    fe = FeatureExtractor(fs=Config.SAMPLING_RATE)
+    #======student load feature extractor======
+
     for subject_folder in subject_folders:
         subject_id = os.path.basename(subject_folder)
         
@@ -173,10 +291,24 @@ def load_all_subjects():
         if relax_segments.size == 0 or focus_segments.size == 0:
             print(f"Warning: Not enough data to create segments for {subject_id}. Skipping this subject.")
             continue
-            
+        #======student feature extraction and concatenation======
+        # 對原始信號也應用濾波器
+        relax_filtered = np.array([filtfilt(fe.b, fe.a, seg) for seg in relax_segments])
+        focus_filtered = np.array([filtfilt(fe.b, fe.a, seg) for seg in focus_segments])
+        
+        relax_features = np.vstack([fe.extract_features(seg) for seg in relax_segments])
+        focus_features = np.vstack([fe.extract_features(seg) for seg in focus_segments])
+        
+        # Concatenate features with filtered segments
+        relax_features = np.hstack([relax_filtered, relax_features])
+        focus_features = np.hstack([focus_filtered, focus_features])
+        #======student feature extraction and concatenation======   
+
+
+
         # The segments are now our "features"
-        relax_features = relax_segments
-        focus_features = focus_segments
+        #relax_features = relax_segments
+        #focus_features = focus_segments
         
         # Label data
         relax_labels = np.zeros(len(relax_features))  # 0 = relax
@@ -304,7 +436,7 @@ def plot_results(results):
         axes[2].set_title('Training Loss Curves')
     
     plt.tight_layout()
-    plt.savefig('bci_results_raw_data.png', dpi=300, bbox_inches='tight')
+    plt.savefig('bci_results_filtered_data.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 def main():
